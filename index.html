@@ -84,9 +84,8 @@ section { margin-top: var(--space-3); }
   border-radius: var(--radius);
   overflow: hidden;
 }
-.viewfinder video, .viewfinder img {
-  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
-}
+.viewfinder video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.viewfinder img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .viewfinder img[hidden], .viewfinder video[hidden] { display: none; }
 .guide {
   position: absolute; left: 6%; right: 6%; top: 30%; height: 40%;
@@ -310,8 +309,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     if (captured) { reset(); await startCamera(); return; }
     if (!video.videoWidth) return;
     const vw = video.videoWidth, vh = video.videoHeight;
-    // 枠（高さ中央40%・幅88%）だけ切り出す
-    const sx = vw * 0.06, sw = vw * 0.88, sy = vh * 0.30, sh = vh * 0.40;
+    // 画面では 4:3 の窓に映像を拡大して表示しているので、見えている範囲を求め、その中の枠だけを切り出す
+    const boxAspect = 4 / 3, va = vw / vh;
+    const visW = va > boxAspect ? vh * boxAspect : vw;
+    const visH = va > boxAspect ? vh : vw / boxAspect;
+    const offX = (vw - visW) / 2, offY = (vh - visH) / 2;
+    const sx = offX + visW * 0.06, sw = visW * 0.88, sy = offY + visH * 0.30, sh = visH * 0.40;
     const c = document.createElement("canvas");
     c.width = sw; c.height = sh;
     c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
@@ -373,15 +376,21 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     });
     return worker;
   }
-  /* 画像を整える：幅を揃え、白黒反転を直し、画面のモアレ（縞）を消すためにぼかす */
-  const OCR_WIDTH = 1100;
-  function prepare(src) {
-    const W = OCR_WIDTH, H = Math.max(1, Math.round(src.height * W / src.width));
+  /* 画像を整える：幅を揃え、白黒反転を直し、コントラストを広げる */
+  function prepare(src, W) {
+    const h0 = Math.max(1, Math.round(src.height * W / src.width));
+    const pad = Math.round(W * 0.03), H = h0 + 2 * pad;   // 端の文字が欠けないよう、周りに余白を足す
+    W = W + 2 * pad;
     const c = document.createElement("canvas");
     c.width = W; c.height = H;
     const g = c.getContext("2d", { willReadFrequently: true });
+    const m = document.createElement("canvas"); m.width = m.height = 1;
+    m.getContext("2d").drawImage(src, 0, 0, 1, 1);
+    const mc = m.getContext("2d").getImageData(0, 0, 1, 1).data;   // 画像全体の平均色（ほぼ背景色）
+    g.fillStyle = `rgb(${mc[0]},${mc[1]},${mc[2]})`;
+    g.fillRect(0, 0, W, H);
     g.imageSmoothingQuality = "high";
-    g.drawImage(src, 0, 0, W, H);
+    g.drawImage(src, pad, pad, W - 2 * pad, h0);
     const p = g.getImageData(0, 0, W, H).data;
     const gray = new Uint8Array(W * H);
     let sum = 0;
@@ -427,7 +436,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     g.putImageData(img, 0, 0);
     return c;
   }
-  /* 範囲内の黒い塊の数を数える（÷ は点・線・点の3つ、+ と − は1つ） */
+  /* 範囲内の黒い塊の数を数える（÷ は点・線・点の3つ、+ × − は1つ、? は2つ） */
   function countBlobs(gray, W, x0, y0, x1, y1, th, minArea) {
     const w = x1 - x0, h = y1 - y0, seen = new Uint8Array(w * h);
     let count = 0;
@@ -450,51 +459,108 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     }
     return count;
   }
+  /* 範囲内の黒い画素の数 */
+  function inkIn(gray, W, x0, y0, x1, y1, th) {
+    let n = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (gray[y * W + x] < th) n++;
+    return n;
+  }
+  /* 1回分の読み取り：幅 W0 に整え、k は文字の大きさに合わせたぼかしの強さ */
+  async function pass(canvas, W0, k) {
+    const w = await getWorker();
+    const { gray, W, H } = prepare(canvas, W0);
+    const soft = boxBlur(boxBlur(gray, W, H, Math.max(1, Math.round(2 * k))), W, H, Math.max(1, Math.round(k))); // 縞を消す
+    const sharp = boxBlur(gray, W, H, Math.max(1, Math.round(k)));                                              // 記号の形の判定用
+    const th = (percentile(sharp, 0.02) + percentile(sharp, 0.6)) / 2;
+    const minArea = Math.max(8, Math.round(12 * k * k));
+    const { data } = await w.recognize(toCanvas(soft, W, H));
+    // 「=」を含み、数字が多い行を式とみなす
+    let best = null, bestScore = -1;
+    for (const line of (data.lines || [])) {
+      const sc = (line.text.match(/\d/g) || []).length + (/=/.test(line.text) ? 10 : 0);
+      if (sc > bestScore) { bestScore = sc; best = line; }
+    }
+    let text = "", h = 0;
+    if (best) {
+      const syms = [];
+      for (const word of best.words) for (const sy of word.symbols) syms.push(sy);
+      const by0 = Math.max(0, best.bbox.y0 - 4), by1 = Math.min(H, best.bbox.y1 + 4);
+      const blobs = b => countBlobs(sharp, W, Math.max(0, b.x0 - 3), by0, Math.min(W, b.x1 + 3), by1, th, minArea);
+      const isCross = b => {            // × は四隅に線があり、+ は辺の中央に線がある
+        const x0 = Math.max(0, b.x0), x1 = Math.min(W, b.x1), y0 = Math.max(0, b.y0), y1 = Math.min(H, b.y1);
+        const cw = Math.max(1, Math.round((x1 - x0) * 0.25)), chh = Math.max(1, Math.round((y1 - y0) * 0.25));
+        const corners = inkIn(sharp, W, x0, y0, x0 + cw, y0 + chh, th) + inkIn(sharp, W, x1 - cw, y0, x1, y0 + chh, th)
+          + inkIn(sharp, W, x0, y1 - chh, x0 + cw, y1, th) + inkIn(sharp, W, x1 - cw, y1 - chh, x1, y1, th);
+        const mx = Math.round((x0 + x1) / 2), my = Math.round((y0 + y1) / 2), hw = Math.max(1, cw >> 1), hh = Math.max(1, chh >> 1);
+        const mids = inkIn(sharp, W, mx - hw, y0, mx + hw, y0 + chh, th) + inkIn(sharp, W, mx - hw, y1 - chh, mx + hw, y1, th)
+          + inkIn(sharp, W, x0, my - hh, x0 + cw, my + hh, th) + inkIn(sharp, W, x1 - cw, my - hh, x1, my + hh, th);
+        return corners > mids;
+      };
+      const out = []; let prev = null;
+      syms.forEach((sy, idx) => {
+        let ch = sy.text; const b = sy.bbox;
+        if ("+-÷".includes(ch)) {
+          // OCRは ÷ を + や − に分けて読みやすいので、近接する記号は1つにまとめ、形で見分ける
+          if (prev && "+-÷".includes(prev.ch) && b.x0 - prev.b.x1 < (prev.b.x1 - prev.b.x0) * 0.8) {
+            prev.b = { x0: prev.b.x0, x1: Math.max(prev.b.x1, b.x1), y0: prev.b.y0, y1: prev.b.y1 };
+            if (blobs(prev.b) === 3) prev.ch = "÷";
+            return;
+          }
+          if (blobs(b) === 3) ch = "÷";
+          else if (ch === "+" && isCross(b)) ch = "×";
+        } else if ("xX×*".includes(ch) && !isCross(b) && blobs(b) === 1) {
+          ch = "+";
+        } else if (ch === "7" && idx === syms.length - 1 && prev && prev.ch === "=") {
+          if (blobs(b) >= 2) ch = "?";   // 「?」は点と曲線の2つの塊。7は1つ
+        }
+        prev = { ch, b };
+        out.push(prev);
+      });
+      text = out.map(o => o.ch).join("");
+      const hs = syms.filter(sy => /\d/.test(sy.text)).map(sy => sy.bbox.y1 - sy.bbox.y0).sort((a, b) => a - b);
+      if (hs.length) h = hs[Math.floor(hs.length / 2)];   // 数字の高さ（文字の大きさの目安）
+    }
+    const digits = (text.match(/\d/g) || []).length;
+    const valid = plausible(text);
+    return { text, h, valid, score: (valid ? 100 : 0) + Math.min(digits, 20) + (/=/.test(text) ? 4 : 0) };
+  }
+  /* 式として計算できる形か（かっこ・記号の並びが正しいか） */
+  function plausible(text) {
+    try {
+      const src = normalize(text), parts = src.split("=");
+      if (parts.length > 2 || src.length < 3) return false;
+      let ok = false;
+      for (const q of parts) {
+        if (q === "" || q === "?") continue;
+        parse(q);
+        ok = ok || /[-+*/]/.test(q) || q.includes("?");
+      }
+      return ok;
+    } catch (e) { return false; }
+  }
   async function read(canvas) {
     confirmBox.hidden = false; answerBox.hidden = true;
     expr.value = ""; expr.disabled = true; calcBtn.disabled = true;
     $("confirmHint").textContent = "読み取り中です。初回は準備に少し時間がかかります…";
     try {
-      const w = await getWorker();
-      const { gray, W, H } = prepare(canvas);
-      const soft = boxBlur(boxBlur(gray, W, H, 2), W, H, 1);      // OCR用（縞を消す）
-      const sharp = boxBlur(gray, W, H, 1);                       // 記号の形の判定用
-      const th = (percentile(sharp, 0.02) + percentile(sharp, 0.6)) / 2;
-      const minArea = Math.max(8, Math.round(12 * (W / 1082) * (W / 1082)));
-      const { data } = await w.recognize(toCanvas(soft, W, H));
-      // 数字が最も多い行を式とみなす
-      let best = null, bestScore = -1;
-      for (const line of (data.lines || [])) {
-        const sc = (line.text.match(/\d/g) || []).length + (/[=?]/.test(line.text) ? 0.5 : 0);
-        if (sc > bestScore) { bestScore = sc; best = line; }
+      const TARGET = 66;                        // OCRが読みやすい数字の高さ(px)
+      const clampW = x => Math.max(500, Math.min(3200, Math.round(x)));
+      // 撮影した式の大きさは分からないので、数字の高さが合う倍率を探す。式として計算できる結果が出た時点で止める
+      const queue = [2, 1, 3, 1.5, 0.6].map(m => clampW(canvas.width * m));
+      const tried = [];
+      let best = null;
+      while (queue.length && tried.length < 6) {
+        const wx = queue.shift();
+        if (tried.some(t => Math.abs(t - wx) < wx * 0.12)) continue;
+        tried.push(wx);
+        const r = await pass(canvas, wx, 1);
+        if (!best || r.score > best.score) best = r;
+        if (r.valid && (r.h === 0 || (r.h >= 50 && r.h <= 80))) break;
+        // 数字の高さが分かれば、TARGET になる倍率を次に試す
+        if (r.h >= 12 && (r.h < 50 || r.h > 80)) queue.unshift(clampW(wx * TARGET / r.h));
       }
-      let text = "";
-      if (best) {
-        const syms = [];
-        for (const word of best.words) for (const sy of word.symbols) syms.push(sy);
-        const blobs = b => countBlobs(sharp, W, Math.max(0, b.x0 - 3), Math.max(0, best.bbox.y0 - 4), Math.min(W, b.x1 + 3), Math.min(H, best.bbox.y1 + 4), th, minArea);
-        let prev = null; const out = [];
-        syms.forEach((sy, idx) => {
-          let ch = sy.text;
-          const b = sy.bbox;
-          if ("+-÷".includes(ch)) {
-            // OCRは ÷ を + や − に分けて読みやすいので、近接する記号は1つにまとめ、形（塊が3つ）で見分ける
-            if (prev && "+-÷".includes(prev.ch) && b.x0 - prev.b.x1 < (prev.b.x1 - prev.b.x0) * 0.8) {
-              prev.b = { x0: prev.b.x0, x1: Math.max(prev.b.x1, b.x1), y0: prev.b.y0, y1: prev.b.y1 };
-              if (blobs(prev.b) === 3) prev.ch = "÷";
-              return;
-            }
-            if (blobs(b) === 3) ch = "÷";
-          } else if (ch === "7" && idx === syms.length - 1 && prev && prev.ch === "=") {
-            if (blobs(b) >= 2) ch = "?";   // 「?」は点と曲線の2つの塊。7は1つ
-          }
-          prev = { ch, b };
-          out.push(prev);
-        });
-        text = out.map(o => o.ch).join("");
-      }
-      expr.value = text;
-      $("confirmHint").textContent = text
+      expr.value = best.text;
+      $("confirmHint").textContent = best.text
         ? "違っていたら直してください。× ÷ + − ( ) ? が使えます。"
         : "式を読み取れませんでした。手で入力するか、撮り直してください。";
     } catch (e) {
