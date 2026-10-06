@@ -368,26 +368,87 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     if (!window.Tesseract) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js");
     worker = await Tesseract.createWorker("eng");
     await worker.setParameters({
-      tessedit_char_whitelist: "0123456789+-×÷=()./xX*?□",
+      tessedit_char_whitelist: "0123456789+-×÷=()./xX*?□,",
       tessedit_pageseg_mode: "6"
     });
     return worker;
   }
-  function binarize(src) {
+  /* 画像を整える：幅を揃え、白黒反転を直し、画面のモアレ（縞）を消すためにぼかす */
+  const OCR_WIDTH = 1100;
+  function prepare(src) {
+    const W = OCR_WIDTH, H = Math.max(1, Math.round(src.height * W / src.width));
     const c = document.createElement("canvas");
-    c.width = src.width; c.height = src.height;
-    const g = c.getContext("2d");
-    g.drawImage(src, 0, 0);
-    const d = g.getImageData(0, 0, c.width, c.height), p = d.data;
+    c.width = W; c.height = H;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.imageSmoothingQuality = "high";
+    g.drawImage(src, 0, 0, W, H);
+    const p = g.getImageData(0, 0, W, H).data;
+    const gray = new Uint8Array(W * H);
     let sum = 0;
-    for (let i = 0; i < p.length; i += 4) sum += (p[i] * 0.3 + p[i + 1] * 0.59 + p[i + 2] * 0.11);
-    const th = sum / (p.length / 4) * 0.85;
-    for (let i = 0; i < p.length; i += 4) {
-      const v = (p[i] * 0.3 + p[i + 1] * 0.59 + p[i + 2] * 0.11) > th ? 255 : 0;
-      p[i] = p[i + 1] = p[i + 2] = v;
+    for (let i = 0, j = 0; i < p.length; i += 4, j++) {
+      const v = Math.round(p[i] * 0.3 + p[i + 1] * 0.59 + p[i + 2] * 0.11);
+      gray[j] = v; sum += v;
     }
-    g.putImageData(d, 0, 0);
+    if (sum / gray.length < 110) for (let j = 0; j < gray.length; j++) gray[j] = 255 - gray[j]; // 暗い背景は反転
+    const lo = percentile(gray, 0.01), hi = percentile(gray, 0.99), span = Math.max(1, hi - lo);
+    for (let j = 0; j < gray.length; j++) gray[j] = Math.max(0, Math.min(255, Math.round((gray[j] - lo) * 255 / span)));
+    return { gray, W, H };
+  }
+  function percentile(arr, q) {
+    const h = new Uint32Array(256);
+    for (let i = 0; i < arr.length; i++) h[arr[i]]++;
+    let acc = 0; const target = arr.length * q;
+    for (let v = 0; v < 256; v++) { acc += h[v]; if (acc >= target) return v; }
+    return 255;
+  }
+  function boxBlur(src, W, H, r) {
+    const tmp = new Uint8Array(src.length), out = new Uint8Array(src.length), n = 2 * r + 1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) s += src[y * W + Math.min(W - 1, Math.max(0, x + k))];
+      tmp[y * W + x] = s / n;
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) s += tmp[Math.min(H - 1, Math.max(0, y + k)) * W + x];
+      out[y * W + x] = s / n;
+    }
+    return out;
+  }
+  function toCanvas(gray, W, H) {
+    const c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    const img = g.createImageData(W, H);
+    for (let j = 0; j < gray.length; j++) {
+      img.data[j * 4] = img.data[j * 4 + 1] = img.data[j * 4 + 2] = gray[j];
+      img.data[j * 4 + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
     return c;
+  }
+  /* 範囲内の黒い塊の数を数える（÷ は点・線・点の3つ、+ と − は1つ） */
+  function countBlobs(gray, W, x0, y0, x1, y1, th, minArea) {
+    const w = x1 - x0, h = y1 - y0, seen = new Uint8Array(w * h);
+    let count = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (seen[i] || gray[(y0 + y) * W + x0 + x] >= th) continue;
+      const st = [i]; seen[i] = 1; let area = 0;
+      while (st.length) {
+        const k = st.pop(); area++;
+        const cx = k % w, cy = (k - cx) / w;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if (seen[j] || gray[(y0 + ny) * W + x0 + nx] >= th) continue;
+          seen[j] = 1; st.push(j);
+        }
+      }
+      if (area >= minArea) count++;
+    }
+    return count;
   }
   async function read(canvas) {
     confirmBox.hidden = false; answerBox.hidden = true;
@@ -395,11 +456,45 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     $("confirmHint").textContent = "読み取り中です。初回は準備に少し時間がかかります…";
     try {
       const w = await getWorker();
-      const { data } = await w.recognize(binarize(canvas));
-      const lines = (data.text || "").split(/\n/).map(s => s.trim()).filter(Boolean);
-      const best = lines.sort((a, b) => b.length - a.length)[0] || "";
-      expr.value = best.replace(/\s+/g, " ");
-      $("confirmHint").textContent = best
+      const { gray, W, H } = prepare(canvas);
+      const soft = boxBlur(boxBlur(gray, W, H, 2), W, H, 1);      // OCR用（縞を消す）
+      const sharp = boxBlur(gray, W, H, 1);                       // 記号の形の判定用
+      const th = (percentile(sharp, 0.02) + percentile(sharp, 0.6)) / 2;
+      const minArea = Math.max(8, Math.round(12 * (W / 1082) * (W / 1082)));
+      const { data } = await w.recognize(toCanvas(soft, W, H));
+      // 数字が最も多い行を式とみなす
+      let best = null, bestScore = -1;
+      for (const line of (data.lines || [])) {
+        const sc = (line.text.match(/\d/g) || []).length + (/[=?]/.test(line.text) ? 0.5 : 0);
+        if (sc > bestScore) { bestScore = sc; best = line; }
+      }
+      let text = "";
+      if (best) {
+        const syms = [];
+        for (const word of best.words) for (const sy of word.symbols) syms.push(sy);
+        const blobs = b => countBlobs(sharp, W, Math.max(0, b.x0 - 3), Math.max(0, best.bbox.y0 - 4), Math.min(W, b.x1 + 3), Math.min(H, best.bbox.y1 + 4), th, minArea);
+        let prev = null; const out = [];
+        syms.forEach((sy, idx) => {
+          let ch = sy.text;
+          const b = sy.bbox;
+          if ("+-÷".includes(ch)) {
+            // OCRは ÷ を + や − に分けて読みやすいので、近接する記号は1つにまとめ、形（塊が3つ）で見分ける
+            if (prev && "+-÷".includes(prev.ch) && b.x0 - prev.b.x1 < (prev.b.x1 - prev.b.x0) * 0.8) {
+              prev.b = { x0: prev.b.x0, x1: Math.max(prev.b.x1, b.x1), y0: prev.b.y0, y1: prev.b.y1 };
+              if (blobs(prev.b) === 3) prev.ch = "÷";
+              return;
+            }
+            if (blobs(b) === 3) ch = "÷";
+          } else if (ch === "7" && idx === syms.length - 1 && prev && prev.ch === "=") {
+            if (blobs(b) >= 2) ch = "?";   // 「?」は点と曲線の2つの塊。7は1つ
+          }
+          prev = { ch, b };
+          out.push(prev);
+        });
+        text = out.map(o => o.ch).join("");
+      }
+      expr.value = text;
+      $("confirmHint").textContent = text
         ? "違っていたら直してください。× ÷ + − ( ) ? が使えます。"
         : "式を読み取れませんでした。手で入力するか、撮り直してください。";
     } catch (e) {
