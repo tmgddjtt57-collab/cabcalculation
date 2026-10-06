@@ -229,7 +229,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
     <section id="confirm" class="panel" aria-label="読み取った式" hidden>
       <h2>読み取った式</h2>
-      <p class="hint" id="confirmHint">違っていたら直してください。× ÷ + − ( ) が使えます。</p>
+      <p class="hint" id="confirmHint">違っていたら直してください。× ÷ + − ( ) ? が使えます。</p>
       <label for="expr" class="hint" style="display:none">式</label>
       <input id="expr" class="field" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="読み取った式">
       <div class="row"><button id="calc" type="button">計算する</button></div>
@@ -368,7 +368,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     if (!window.Tesseract) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js");
     worker = await Tesseract.createWorker("eng");
     await worker.setParameters({
-      tessedit_char_whitelist: "0123456789+-×÷=()./xX*",
+      tessedit_char_whitelist: "0123456789+-×÷=()./xX*?□",
       tessedit_pageseg_mode: "6"
     });
     return worker;
@@ -400,7 +400,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
       const best = lines.sort((a, b) => b.length - a.length)[0] || "";
       expr.value = best.replace(/\s+/g, " ");
       $("confirmHint").textContent = best
-        ? "違っていたら直してください。× ÷ + − ( ) が使えます。"
+        ? "違っていたら直してください。× ÷ + − ( ) ? が使えます。"
         : "式を読み取れませんでした。手で入力するか、撮り直してください。";
     } catch (e) {
       $("confirmHint").textContent = "読み取りの準備に失敗しました（通信が必要です）。手で入力してください。";
@@ -419,12 +419,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
       .replace(/[÷／/]/g, "/")
       .replace(/[（]/g, "(").replace(/[）]/g, ")")
       .replace(/[．]/g, ".")
-      .replace(/[=＝?？]+\s*$/, "")
+      .replace(/[□■＿？]/g, "?")
+      .replace(/＝/g, "=")
       .replace(/,/g, "")
       .replace(/\s+/g, "");
   }
   function parse(src) {
-    const toks = src.match(/\d+(?:\.\d+)?|[-+*/()]/g) || [];
+    const toks = src.match(/\d+(?:\.\d+)?|[-+*/()?]/g) || [];
     if (toks.join("") !== src || !toks.length) throw new Error("式として読めません");
     let i = 0;
     const peek = () => toks[i];
@@ -432,6 +433,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
       const t = toks[i++];
       if (t === undefined) throw new Error("式が途中で終わっています");
       if (t === "(") { const n = add(); if (toks[i++] !== ")") throw new Error("かっこが閉じていません"); return n; }
+      if (t === "?") return { t: "x" };
       if (t === "-") return { t: "u", c: primary() };
       if (t === "+") return primary();
       if (/^\d/.test(t)) return { t: "n", v: parseFloat(t) };
@@ -446,13 +448,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   const round = n => Math.round(n * 1e9) / 1e9;
   const fmt = n => String(round(n));
   const sym = { "*": "×", "/": "÷", "+": "+", "-": "−" };
-  function evaluate(node, steps) {
+  function evaluate(node, steps, xv) {
     if (node.t === "n") return node.v;
-    if (node.t === "u") return -evaluate(node.c, steps);
-    const a = evaluate(node.l, steps), b = evaluate(node.r, steps);
+    if (node.t === "x") return xv;
+    if (node.t === "u") return -evaluate(node.c, steps, xv);
+    const a = evaluate(node.l, steps, xv), b = evaluate(node.r, steps, xv);
     if (node.op === "/" && b === 0) throw new Error("0で割ることはできません");
     const r = node.op === "+" ? a + b : node.op === "-" ? a - b : node.op === "*" ? a * b : a / b;
-    steps.push(`${fmt(a)} ${sym[node.op]} ${fmt(b)} = ${fmt(r)}`);
+    if (steps) steps.push(`${fmt(a)} ${sym[node.op]} ${fmt(b)} = ${fmt(r)}`);
     return r;
   }
 
@@ -463,11 +466,47 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     echo.textContent = raw;
     try {
       const steps = [];
-      const v = evaluate(parse(normalize(raw)), steps);
-      currentAnswer = round(v);
-      ansEl.textContent = "= " + fmt(v);
+      const src = normalize(raw);
+      const parts = src.split("=");
+      if (parts.length > 2) throw new Error("「=」が2つ以上あります");
+      const L = parts[0], R = parts.length === 2 ? parts[1] : "";
+      let target = null;
+      if (parts.length === 2 && (R === "" || R === "?")) target = L;
+      else if (parts.length === 2 && (L === "" || L === "?")) target = R;
+      else if (parts.length === 1 && !src.includes("?")) target = L;
+      let shown, hist;
+      if (target !== null) {
+        if (target.includes("?")) throw new Error("「?」が残っています");
+        const v = evaluate(parse(target), steps);
+        currentAnswer = round(v);
+        shown = "= " + fmt(v); hist = fmt(v);
+      } else {
+        if (parts.length !== 2 || !L || !R || !src.includes("?")) throw new Error("式の形が読めません");
+        const tl = parse(L), tr = parse(R);
+        const f = x => evaluate(tl, null, x) - evaluate(tr, null, x);
+        let sol = null;
+        try {
+          const f1 = f(1), f2 = f(2), f3 = f(3), sl = f2 - f1;
+          if (Math.abs(f3 - 2 * f2 + f1) < 1e-9 * (1 + Math.abs(f1) + Math.abs(f2)) && Math.abs(sl) > 1e-12) sol = 1 - f1 / sl;
+        } catch (e) { sol = null; }
+        if (sol !== null) { try { if (!(Math.abs(f(sol)) < 1e-6)) sol = null; } catch (e) { sol = null; } }
+        if (sol === null) {
+          for (let k = 0; k <= 200000 && sol === null; k++) {
+            for (const x of (k === 0 ? [0] : [k, -k])) {
+              try { if (Math.abs(f(x)) < 1e-9) { sol = x; break; } } catch (e) { /* 0で割る値は飛ばす */ }
+            }
+          }
+        }
+        if (sol === null) throw new Error("「?」に入る数を求められませんでした");
+        sol = round(sol);
+        steps.push("? = " + fmt(sol) + " を入れて確認");
+        steps.push("左辺 " + fmt(evaluate(tl, null, sol)) + " ／ 右辺 " + fmt(evaluate(tr, null, sol)));
+        currentAnswer = sol;
+        shown = "? = " + fmt(sol); hist = shown;
+      }
+      ansEl.textContent = shown;
       steps.forEach(s => { const li = document.createElement("li"); li.textContent = s; stepsEl.appendChild(li); });
-      addHistory(raw, fmt(v));
+      addHistory(raw, hist);
     } catch (e) {
       currentAnswer = null;
       errEl.textContent = e.message + "。式を直してもう一度押してください。";
@@ -498,7 +537,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     memory.forEach(h => {
       const li = document.createElement("li");
       const l = document.createElement("span"); l.textContent = h.e;
-      const r = document.createElement("span"); r.className = "a"; r.textContent = "= " + h.a;
+      const r = document.createElement("span"); r.className = "a"; r.textContent = h.a.startsWith("?") ? h.a : "= " + h.a;
       li.append(l, r); historyEl.appendChild(li);
     });
     historyEmpty.hidden = memory.length > 0;
