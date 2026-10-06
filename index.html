@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>撮って、計算する｜CAB計算ツール</title>
+<meta name="description" content="CABの計算問題をカメラで撮ると、式を読み取って答えを出す個人用の練習ツールです。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="撮って、計算する｜CAB計算ツール">
+<meta property="og:description" content="CABの計算問題をカメラで撮ると、式を読み取って答えを出します。">
+<meta name="theme-color" content="#F7F7F5">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+/* ===== 更新する人が変える場所：色・余白・文字サイズはここだけ ===== */
+:root {
+  --color-bg: #F7F7F5;
+  --color-surface: #FFFFFF;
+  --color-text: #1A1A1A;
+  --color-muted: #5C5C58;
+  --color-line: #DADAD4;
+  --color-main: #1F3A5F;       /* ボタン・見出し */
+  --color-main-text: #FFFFFF;
+  --color-accent: #C2410C;     /* 答えだけに使う */
+  --color-ok: #166534;
+  --color-ng: #B91C1C;
+
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 40px;
+  --radius: 12px;
+
+  --font-body: "Noto Sans JP", system-ui, sans-serif;
+  --font-num: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --size-base: 1rem;
+  --size-small: 0.875rem;
+  --size-h1: clamp(1.75rem, 7vw, 2.5rem);
+  --size-answer: clamp(2.5rem, 12vw, 4rem);
+  --bar-height: 88px;
+}
+/* ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--size-base);
+  line-height: 1.8;
+  overflow-x: hidden;
+  padding-bottom: calc(var(--bar-height) + env(safe-area-inset-bottom));
+}
+.wrap { max-width: 640px; margin: 0 auto; padding: 0 var(--space-2); }
+
+header { padding: var(--space-3) 0 var(--space-2); }
+h1 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--size-h1);
+  line-height: 1.3;
+  color: var(--color-main);
+  letter-spacing: 0.02em;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.lead { margin: 0; color: var(--color-muted); max-width: 30em; }
+h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--size-small);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+}
+section { margin-top: var(--space-3); }
+
+/* ファインダー */
+.viewfinder {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: #1A1A1A;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.viewfinder video, .viewfinder img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+}
+.viewfinder img[hidden], .viewfinder video[hidden] { display: none; }
+.guide {
+  position: absolute; left: 6%; right: 6%; top: 30%; height: 40%;
+  border: 2px solid rgba(255,255,255,.9);
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.35);
+  pointer-events: none;
+}
+.guide-label {
+  position: absolute; left: 0; right: 0; bottom: var(--space-1);
+  margin: 0; padding: 0 var(--space-2);
+  color: #fff; font-size: var(--size-small);
+  text-shadow: 0 1px 3px rgba(0,0,0,.8);
+}
+.vf-msg {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  padding: var(--space-3); margin: 0;
+  color: #E8E8E4; font-size: var(--size-small); text-align: left;
+}
+.vf-msg[hidden] { display: none; }
+
+/* 入力・出力 */
+.panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+}
+.panel[hidden] { display: none; }
+.hint { margin: 0 0 var(--space-1); font-size: var(--size-small); color: var(--color-muted); }
+.field {
+  width: 100%;
+  font: 500 1.375rem/1.4 var(--font-num);
+  padding: 12px var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+.row { display: flex; gap: var(--space-1); margin-top: var(--space-1); }
+.row > * { flex: 1; }
+
+button, .btn {
+  font: 700 var(--size-base)/1 var(--font-body);
+  min-height: 52px;
+  padding: 0 var(--space-2);
+  border-radius: 10px;
+  border: 2px solid var(--color-main);
+  background: var(--color-main);
+  color: var(--color-main-text);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  text-align: center;
+  transition: transform .12s ease, background-color .12s ease, opacity .12s ease;
+}
+button.secondary, .btn.secondary { background: var(--color-surface); color: var(--color-main); }
+button.text {
+  min-height: 44px; border: none; background: none; color: var(--color-muted);
+  font-weight: 500; text-decoration: underline; padding: 0 var(--space-1);
+}
+@media (hover: hover) {
+  button:hover:not(:disabled), .btn:hover { background: #17304F; color: #fff; }
+  button.secondary:hover:not(:disabled), .btn.secondary:hover { background: #E9EEF5; color: var(--color-main); }
+  button.text:hover:not(:disabled) { background: none; color: var(--color-text); }
+}
+button:active:not(:disabled), .btn:active { transform: scale(.98); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+:focus-visible { outline: 3px solid #1D6FE0; outline-offset: 2px; }
+
+.answer {
+  font: 700 var(--size-answer)/1.2 var(--font-num);
+  color: var(--color-accent);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.expr-echo { font: 500 1.125rem/1.5 var(--font-num); color: var(--color-muted); margin: 0; overflow-wrap: anywhere; }
+.steps { margin: var(--space-1) 0 0; padding-left: 1.6em; font: 500 var(--size-small)/1.9 var(--font-num); color: var(--color-muted); }
+.error { margin: 0; color: var(--color-ng); font-weight: 500; }
+.judge { margin: var(--space-1) 0 0; font-weight: 700; }
+.judge.ok { color: var(--color-ok); }
+.judge.ng { color: var(--color-ng); }
+.own { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--color-line); }
+.own label { display: block; font-size: var(--size-small); color: var(--color-muted); margin-bottom: 4px; }
+
+.history { list-style: none; margin: 0; padding: 0; }
+.history li {
+  display: flex; justify-content: space-between; gap: var(--space-2);
+  padding: 10px 0; border-bottom: 1px solid var(--color-line);
+  font: 500 var(--size-small)/1.5 var(--font-num);
+}
+.history li:last-child { border-bottom: none; }
+.history .a { color: var(--color-accent); font-weight: 700; white-space: nowrap; }
+.empty { margin: 0; color: var(--color-muted); font-size: var(--size-small); }
+
+/* 画面下部に固定する操作バー（親指で押せる位置） */
+.bar {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: rgba(247,247,245,.96);
+  border-top: 1px solid var(--color-line);
+  padding: var(--space-1) 0 calc(var(--space-1) + env(safe-area-inset-bottom));
+  z-index: 10;
+}
+.bar .wrap { display: flex; gap: var(--space-1); }
+.bar #shoot { flex: 2; }
+.bar .btn { flex: 1; }
+.bar input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.bar .btn:focus-within { outline: 3px solid #1D6FE0; outline-offset: 2px; }
+
+.reading { color: var(--color-muted); font-size: var(--size-small); margin: 0; }
+
+/* 読み込み時の動き */
+.rise { animation: rise .45s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+@media (min-width: 900px) {
+  .wrap { padding: 0; }
+  header { padding-top: var(--space-4); }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="rise">
+    <h1>撮って、計算する。</h1>
+    <p class="lead">CABの計算問題を撮ると、式を読み取って答えを出します。練習用です。</p>
+  </header>
+
+  <main>
+    <section aria-label="撮影" class="rise" style="animation-delay:.08s">
+      <div class="viewfinder">
+        <video id="video" playsinline muted hidden></video>
+        <img id="shot" alt="撮影した問題の画像" hidden>
+        <div class="guide" id="guide" hidden></div>
+        <p class="guide-label" id="guideLabel" hidden>式を枠の中に合わせる</p>
+        <p class="vf-msg" id="vfMsg">カメラを準備しています…</p>
+      </div>
+    </section>
+
+    <section id="confirm" class="panel" aria-label="読み取った式" hidden>
+      <h2>読み取った式</h2>
+      <p class="hint" id="confirmHint">違っていたら直してください。× ÷ + − ( ) が使えます。</p>
+      <label for="expr" class="hint" style="display:none">式</label>
+      <input id="expr" class="field" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="読み取った式">
+      <div class="row"><button id="calc" type="button">計算する</button></div>
+    </section>
+
+    <section id="answerBox" class="panel" aria-label="答え" hidden>
+      <h2>答え</h2>
+      <p class="expr-echo" id="echo"></p>
+      <p class="answer" id="answer" aria-live="polite"></p>
+      <p class="error" id="error" role="alert" hidden></p>
+      <ol class="steps" id="steps"></ol>
+      <div class="own">
+        <label for="own">あなたの答え（答え合わせ用）</label>
+        <input id="own" class="field" type="text" inputmode="decimal" autocomplete="off" aria-label="あなたの答え">
+        <p class="judge" id="judge" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section aria-label="履歴">
+      <h2>履歴</h2>
+      <div class="panel">
+        <ul class="history" id="history"></ul>
+        <p class="empty" id="historyEmpty">まだありません。</p>
+        <div class="row"><button id="clear" class="text" type="button" hidden>履歴を全部消す</button></div>
+      </div>
+    </section>
+    <p class="hint" style="margin-top:var(--space-3)">撮影した画像は端末の外へ送りません。履歴はこの端末にだけ保存されます。</p>
+  </main>
+</div>
+
+<div class="bar">
+  <div class="wrap">
+    <button id="shoot" type="button" disabled>撮影する</button>
+    <label class="btn secondary">写真から選ぶ<input id="file" type="file" accept="image/*"></label>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const video = $("video"), shot = $("shot"), vfMsg = $("vfMsg");
+  const guide = $("guide"), guideLabel = $("guideLabel");
+  const shoot = $("shoot"), fileIn = $("file");
+  const confirmBox = $("confirm"), expr = $("expr"), calcBtn = $("calc");
+  const answerBox = $("answerBox"), echo = $("echo"), ansEl = $("answer");
+  const errEl = $("error"), stepsEl = $("steps");
+  const own = $("own"), judge = $("judge");
+  const historyEl = $("history"), historyEmpty = $("historyEmpty"), clearBtn = $("clear");
+
+  let stream = null, captured = false, currentAnswer = null, worker = null;
+
+  /* ---------- カメラ ---------- */
+  function setMsg(t) { vfMsg.textContent = t; vfMsg.hidden = !t; }
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setMsg("このブラウザではカメラを使えません。「写真から選ぶ」を使ってください。");
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 } }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      video.hidden = false; guide.hidden = false; guideLabel.hidden = false;
+      setMsg(""); shoot.disabled = false;
+    } catch (e) {
+      setMsg("カメラが許可されていません。ブラウザの設定で許可するか、「写真から選ぶ」を使ってください。");
+    }
+  }
+  function stopCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+
+  shoot.addEventListener("click", async () => {
+    if (captured) { reset(); await startCamera(); return; }
+    if (!video.videoWidth) return;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    // 枠（高さ中央40%・幅88%）だけ切り出す
+    const sx = vw * 0.06, sw = vw * 0.88, sy = vh * 0.30, sh = vh * 0.40;
+    const c = document.createElement("canvas");
+    c.width = sw; c.height = sh;
+    c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+    showCaptured(c);
+    stopCamera();
+    read(c);
+  });
+
+  fileIn.addEventListener("change", () => {
+    const f = fileIn.files && fileIn.files[0];
+    if (!f) return;
+    const img = new Image();
+    const url = URL.createObjectURL(f);
+    img.onload = () => {
+      const max = 1600, k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = img.width * k; c.height = img.height * k;
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      stopCamera();
+      showCaptured(c);
+      read(c);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); setMsg("この画像は読み込めませんでした。"); };
+    img.src = url;
+    fileIn.value = "";
+  });
+
+  function showCaptured(canvas) {
+    captured = true;
+    shot.src = canvas.toDataURL("image/jpeg", 0.85);
+    shot.hidden = false; video.hidden = true; guide.hidden = true; guideLabel.hidden = true;
+    setMsg("");
+    shoot.textContent = "撮り直す"; shoot.disabled = false;
+  }
+  function reset() {
+    captured = false;
+    shot.hidden = true;
+    shoot.textContent = "撮影する"; shoot.disabled = true;
+    confirmBox.hidden = true; answerBox.hidden = true;
+    setMsg("カメラを準備しています…");
+  }
+
+  /* ---------- 読み取り（端末内OCR：Tesseract.js） ---------- */
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error("load"));
+      document.head.appendChild(s);
+    });
+  }
+  async function getWorker() {
+    if (worker) return worker;
+    if (!window.Tesseract) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js");
+    worker = await Tesseract.createWorker("eng");
+    await worker.setParameters({
+      tessedit_char_whitelist: "0123456789+-×÷=()./xX*",
+      tessedit_pageseg_mode: "6"
+    });
+    return worker;
+  }
+  function binarize(src) {
+    const c = document.createElement("canvas");
+    c.width = src.width; c.height = src.height;
+    const g = c.getContext("2d");
+    g.drawImage(src, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height), p = d.data;
+    let sum = 0;
+    for (let i = 0; i < p.length; i += 4) sum += (p[i] * 0.3 + p[i + 1] * 0.59 + p[i + 2] * 0.11);
+    const th = sum / (p.length / 4) * 0.85;
+    for (let i = 0; i < p.length; i += 4) {
+      const v = (p[i] * 0.3 + p[i + 1] * 0.59 + p[i + 2] * 0.11) > th ? 255 : 0;
+      p[i] = p[i + 1] = p[i + 2] = v;
+    }
+    g.putImageData(d, 0, 0);
+    return c;
+  }
+  async function read(canvas) {
+    confirmBox.hidden = false; answerBox.hidden = true;
+    expr.value = ""; expr.disabled = true; calcBtn.disabled = true;
+    $("confirmHint").textContent = "読み取り中です。初回は準備に少し時間がかかります…";
+    try {
+      const w = await getWorker();
+      const { data } = await w.recognize(binarize(canvas));
+      const lines = (data.text || "").split(/\n/).map(s => s.trim()).filter(Boolean);
+      const best = lines.sort((a, b) => b.length - a.length)[0] || "";
+      expr.value = best.replace(/\s+/g, " ");
+      $("confirmHint").textContent = best
+        ? "違っていたら直してください。× ÷ + − ( ) が使えます。"
+        : "式を読み取れませんでした。手で入力するか、撮り直してください。";
+    } catch (e) {
+      $("confirmHint").textContent = "読み取りの準備に失敗しました（通信が必要です）。手で入力してください。";
+    }
+    expr.disabled = false; calcBtn.disabled = false;
+    expr.focus({ preventScroll: false });
+  }
+
+  /* ---------- 計算（evalは使わない） ---------- */
+  function normalize(s) {
+    return s
+      .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      .replace(/[＋]/g, "+")
+      .replace(/[−ー‐–—－]/g, "-")
+      .replace(/[×xX✕＊*]/g, "*")
+      .replace(/[÷／/]/g, "/")
+      .replace(/[（]/g, "(").replace(/[）]/g, ")")
+      .replace(/[．]/g, ".")
+      .replace(/[=＝?？]+\s*$/, "")
+      .replace(/,/g, "")
+      .replace(/\s+/g, "");
+  }
+  function parse(src) {
+    const toks = src.match(/\d+(?:\.\d+)?|[-+*/()]/g) || [];
+    if (toks.join("") !== src || !toks.length) throw new Error("式として読めません");
+    let i = 0;
+    const peek = () => toks[i];
+    function primary() {
+      const t = toks[i++];
+      if (t === undefined) throw new Error("式が途中で終わっています");
+      if (t === "(") { const n = add(); if (toks[i++] !== ")") throw new Error("かっこが閉じていません"); return n; }
+      if (t === "-") return { t: "u", c: primary() };
+      if (t === "+") return primary();
+      if (/^\d/.test(t)) return { t: "n", v: parseFloat(t) };
+      throw new Error("式の並びが正しくありません");
+    }
+    function mul() { let l = primary(); while (peek() === "*" || peek() === "/") { const op = toks[i++]; l = { t: "b", op, l, r: primary() }; } return l; }
+    function add() { let l = mul(); while (peek() === "+" || peek() === "-") { const op = toks[i++]; l = { t: "b", op, l, r: mul() }; } return l; }
+    const tree = add();
+    if (i !== toks.length) throw new Error("かっこの数が合っていません");
+    return tree;
+  }
+  const round = n => Math.round(n * 1e9) / 1e9;
+  const fmt = n => String(round(n));
+  const sym = { "*": "×", "/": "÷", "+": "+", "-": "−" };
+  function evaluate(node, steps) {
+    if (node.t === "n") return node.v;
+    if (node.t === "u") return -evaluate(node.c, steps);
+    const a = evaluate(node.l, steps), b = evaluate(node.r, steps);
+    if (node.op === "/" && b === 0) throw new Error("0で割ることはできません");
+    const r = node.op === "+" ? a + b : node.op === "-" ? a - b : node.op === "*" ? a * b : a / b;
+    steps.push(`${fmt(a)} ${sym[node.op]} ${fmt(b)} = ${fmt(r)}`);
+    return r;
+  }
+
+  function calculate() {
+    const raw = expr.value.trim();
+    answerBox.hidden = false;
+    stepsEl.innerHTML = ""; errEl.hidden = true; ansEl.textContent = ""; judge.textContent = ""; own.value = "";
+    echo.textContent = raw;
+    try {
+      const steps = [];
+      const v = evaluate(parse(normalize(raw)), steps);
+      currentAnswer = round(v);
+      ansEl.textContent = "= " + fmt(v);
+      steps.forEach(s => { const li = document.createElement("li"); li.textContent = s; stepsEl.appendChild(li); });
+      addHistory(raw, fmt(v));
+    } catch (e) {
+      currentAnswer = null;
+      errEl.textContent = e.message + "。式を直してもう一度押してください。";
+      errEl.hidden = false;
+    }
+    answerBox.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
+  }
+  calcBtn.addEventListener("click", calculate);
+  expr.addEventListener("keydown", e => { if (e.key === "Enter") calculate(); });
+
+  own.addEventListener("input", () => {
+    if (currentAnswer === null || !own.value.trim()) { judge.textContent = ""; return; }
+    const v = parseFloat(normalize(own.value));
+    if (Number.isNaN(v)) { judge.textContent = ""; return; }
+    const ok = Math.abs(v - currentAnswer) < 1e-6;
+    judge.className = "judge " + (ok ? "ok" : "ng");
+    judge.textContent = ok ? "○ 正解です" : "× 違います（答えは " + fmt(currentAnswer) + "）";
+  });
+
+  /* ---------- 履歴（この端末のみ） ---------- */
+  const KEY = "cab-calc-history";
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; } }
+  function save(list) { try { localStorage.setItem(KEY, JSON.stringify(list)); } catch (e) { /* 保存できなくても動作は続ける */ } }
+  let memory = load();
+  function addHistory(e, a) { memory = [{ e, a }, ...memory].slice(0, 20); save(memory); renderHistory(); }
+  function renderHistory() {
+    historyEl.innerHTML = "";
+    memory.forEach(h => {
+      const li = document.createElement("li");
+      const l = document.createElement("span"); l.textContent = h.e;
+      const r = document.createElement("span"); r.className = "a"; r.textContent = "= " + h.a;
+      li.append(l, r); historyEl.appendChild(li);
+    });
+    historyEmpty.hidden = memory.length > 0;
+    clearBtn.hidden = memory.length === 0;
+  }
+  clearBtn.addEventListener("click", () => { memory = []; save(memory); renderHistory(); });
+
+  renderHistory();
+  startCamera();
+})();
+</script>
+</body>
+</html>
